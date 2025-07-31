@@ -47,7 +47,7 @@ _near_obstacle = .5
 lamda_progress   = 100
 lamda_lidar      = -1/50
 lamda_heading    = -1/40
-lamda_ang        = -1/1000
+lamda_ang        = -1/10
 lamda_goal       = 10
 lamda_obs        = -10
 
@@ -135,7 +135,6 @@ class HarshEnv(Env):
         self.yaw_prev = 0.0
         self.linear_vel_log = []
         self.angular_vel_log = []
-        self.yaw_log = []
 
         self.torque_logs = [[] for _ in range(4)]
         self.velocity_logs = [[] for _ in range(4)]
@@ -185,7 +184,7 @@ class HarshEnv(Env):
 
         # --- Apply current action -----------------------------------
         self._apply_velocity(curr_action[0], curr_action[1])
-        self.robot.step(TIME_STEP)
+        for _ in range(5): self.robot.step(TIME_STEP)
         # Compute power = sum(torque × angular velocity)
         power = 0.0
         for i, w in enumerate(self.wheels):
@@ -208,11 +207,10 @@ class HarshEnv(Env):
         self.prev_pos = curr_pos
         
         yaw_now = self._yaw()
-        self.yaw_log.append(yaw_now)
         delta_yaw = abs((yaw_now - self.yaw_prev + np.pi) % (2 * np.pi) - np.pi)  # wrapped difference
         self.total_turn += delta_yaw
         self.yaw_prev = yaw_now
-        
+
         self._read_human_position()
 
         # --- Observation -------------------------------------------
@@ -303,7 +301,7 @@ class HarshEnv(Env):
         for i, (lin, ang) in enumerate(self.future_actions):
             # Apply action
             self._apply_velocity(lin, ang)
-            self.robot.step(TIME_STEP)
+            for _ in range(5): self.robot.step(TIME_STEP)
     
             # Get actual new position and orientation
 
@@ -413,28 +411,30 @@ class HarshEnv(Env):
         # Step 0: Stop everything before resetting
         for i, w in enumerate(self.wheels):
             w.setVelocity(0 if i % 2 == 0 else 0)
-            self.robot_node.resetPhysics()
+        self.robot_node.resetPhysics()
 
-        for _ in range(1): self.robot.step(TIME_STEP)
+        for _ in range(2): self.robot.step(TIME_STEP)
     
         # Step 2: Restore pose
         self.robot_node.getField("translation").setSFVec3f(s['position'])
         self.robot_node.getField("rotation").setSFRotation(s['rotation'])
     
-        self.robot.step(TIME_STEP)  # Let Webots apply pose
+        for _ in range(2): self.robot.step(TIME_STEP)
     
         # Step 3: Restore 6D velocity (linear + angular)
         self.robot_node.setVelocity(s['linear_velocity'] + s['angular_velocity'])
     
         # Step 4: Restore motor target velocities
-        for i, w in enumerate(self.wheels):
-            w.setVelocity(s['wheel_velocities'][i])
+        #for i, w in enumerate(self.wheels):
+            #w.setVelocity(s['wheel_velocities'][i])
     
         # Step 5: Restore internal environment state
         self.prev_dist_to_goal = s['prev_dist_to_goal']
         self.reached_goal = s['reached_goal']
         self.prev_pos = s['prev_pos']
         self.yaw_prev = s['yaw_prev']
+        
+        #for _ in range(5):  self.robot.step(TIME_STEP)  # Wait for reset
 
     # ------------------------------------------------------------------
     # low-level controller
@@ -572,7 +572,6 @@ class HarshEnv(Env):
     def show_map(self):    
         plt.figure("Global Map with Local Patch", figsize=(8, 8))
         plt.clf()
-        #plt.imshow(self.global_map, cmap='gray', origin='lower')
         plt.imshow(self.global_map, cmap='gray', origin='lower', vmin=0.0, vmax=1.0)
 
         plt.title(f"Global Map (step {self.steps})")
@@ -676,17 +675,6 @@ class HarshEnv(Env):
         plt.tight_layout()
         plt.show()
 
-    def plot_yaw_log(self):    
-        plt.figure(figsize=(10, 4))
-        plt.plot(self.yaw_log, label="Yaw (ψ)", linewidth=2)
-        #plt.title("Robot Heading")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Yaw ψ (rad)")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
 # ======================================================================
 # Training / evaluation entry-point
 # ======================================================================
@@ -757,14 +745,14 @@ if __name__ == "__main__":
     from stable_baselines3.common.monitor import Monitor
 
     TIMESTEPS = 400_000
-    NUM_EPISODES = 20 
-    Train = False
+    NUM_EPISODES = 50 
+    Train = True
     device = "cpu"
     LOG_DIR = "./logs_ppo"
 
     results = []
 
-    for HORIZON in range(6, 51, 2):
+    for HORIZON in range(2, 21, 1):
         print(f"\n🌟 Starting HORIZON = {HORIZON}")
         lamda_future = 1 / HORIZON
         MODEL_PATH = f"ppo_harsh_{HORIZON}.zip"
@@ -806,7 +794,7 @@ if __name__ == "__main__":
         pattern = f"./checkpoints/ppo_harsh_{HORIZON}_*steps.zip"
         checkpoint_files = sorted(glob.glob(pattern), key=lambda x: int(re.findall(r"(\d+)_steps", x)[0]))
         
-        for ckpt_path in checkpoint_files[7:]:
+        for ckpt_path in checkpoint_files[6:]:
             print(f"🔍 Evaluating checkpoint: {ckpt_path}")
             model = PPO.load(ckpt_path, env=env, device=device)
         
@@ -819,16 +807,15 @@ if __name__ == "__main__":
                     action, _ = model.predict(obs, deterministic=True)
                     obs, r, done, truncated, _ = env.step(action)
                     #env.env.show_map()
+
                 success += int(env.env.reached_goal)
                 steps   += env.env.steps
                 length  += env.env.total_distance
                 smooth  += env.env.total_turn
                 energy  += env.env.energy_consumed
-                
                 #env.env.plot_wheel_data()
-                env.env.plot_robot_velocities()
-                env.env.plot_yaw_log()
-
+                #env.env.plot_robot_velocities()
+                
                 success_rate = success / NUM_EPISODES * 100
             if success_rate > best_success:
                 best_success = success_rate
